@@ -2,16 +2,20 @@ use std::str::FromStr;
 
 use async_trait::async_trait;
 use ipnet::Ipv6Net;
-use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
+use k8s_openapi::{
+    apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition,
+    apimachinery::pkg::apis::meta::v1::ObjectMeta,
+};
 use kube::{
     api::{Patch, PatchParams},
-    core::ObjectMeta,
-    Api, Client, CustomResource,
+    client::ConfigExt,
+    Api, Client, Config, CustomResource,
 };
 use log::{debug, info, warn};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tower::ServiceBuilder;
 
 use super::{Connector, ConnectorError};
 
@@ -32,7 +36,23 @@ enum K8sError {
 }
 impl From<K8sError> for ConnectorError {
     fn from(value: K8sError) -> Self {
-        value.into()
+        ConnectorError {
+            msg: value.to_string(),
+        }
+    }
+}
+impl From<kube::Error> for ConnectorError {
+    fn from(value: kube::Error) -> Self {
+        ConnectorError {
+            msg: value.to_string(),
+        }
+    }
+}
+impl From<kube::config::InferConfigError> for ConnectorError {
+    fn from(value: kube::config::InferConfigError) -> Self {
+        ConnectorError {
+            msg: value.to_string(),
+        }
     }
 }
 
@@ -42,11 +62,11 @@ impl From<K8sError> for ConnectorError {
 #[kube(
     group = "metallb.io",
     version = "v1beta1",
-    kind = "IpAddressPool",
+    kind = "IPAddressPool",
     namespaced
 )]
 #[allow(non_snake_case)]
-struct IpAddressPoolSpec {
+struct IPAddressPoolSpec {
     addresses: Vec<String>,
     autoAssign: Option<bool>,
     avoidBuggyIPs: Option<bool>,
@@ -60,17 +80,22 @@ pub struct KubeClient<'a> {
 impl KubeClient<'_> {
     /// Connects to the k8s API and looks for a MetalLB IpAddressPool with the given name in the default namespace
     /// An error is returned if no pool is found.
-    pub async fn try_new(name: &str) -> Result<Box<dyn Connector + '_>, ConnectorError> {
-        let c = match Client::try_default().await {
-            Ok(c) => c,
-            Err(e) => return Err(K8sError::ConnectionError(e.to_string()).into()),
-        };
+    pub async fn try_new(
+        name: &str,
+        no_verify: bool,
+    ) -> Result<Box<dyn Connector + '_>, ConnectorError> {
+        let mut cfg = Config::infer().await?;
+        cfg.accept_invalid_certs = no_verify;
+        debug!("Inferred kube config: {:?}", cfg);
+
+        let service = ServiceBuilder::new()
+            .layer(cfg.base_uri_layer())
+            .option_layer(cfg.auth_layer()?)
+            .service(hyper::Client::builder().build(cfg.rustls_https_connector()?));
+        let c = Client::new(service, cfg.default_namespace);
 
         let crds: Api<CustomResourceDefinition> = Api::all(c.clone());
-        let p = match crds.get_opt(METALLB_IPADDRPOOL_CRD_NAME).await {
-            Ok(p) => p,
-            Err(e) => return Err(K8sError::ConnectionError(e.to_string()).into()),
-        };
+        let p = crds.get_opt(METALLB_IPADDRPOOL_CRD_NAME).await?;
 
         if p.is_none() {
             return Err(K8sError::CRDNotFound.into());
@@ -81,14 +106,17 @@ impl KubeClient<'_> {
         match kclient.find_pool().await {
             Ok(_) => {}
             Err(e) => {
-                warn!("Error encountered when trying to read IPAddressPool: {}", e)
+                warn!(
+                    "Error encountered when trying to read IPAddressPool, continuing: {}",
+                    e
+                )
             }
         }
         Ok(Box::new(kclient))
     }
 
-    async fn find_pool(&self) -> Result<IpAddressPool, K8sError> {
-        let pools_api: Api<IpAddressPool> = Api::default_namespaced(self.client.clone());
+    async fn find_pool(&self) -> Result<IPAddressPool, K8sError> {
+        let pools_api: Api<IPAddressPool> = Api::default_namespaced(self.client.clone());
 
         match pools_api.get_opt(self.name).await {
             Ok(p) => match p {
@@ -99,19 +127,23 @@ impl KubeClient<'_> {
         }
     }
 
-    fn gen_patch(&self, pool: Vec<String>) -> Patch<IpAddressPool> {
-        let p = Patch::Apply(IpAddressPool {
+    fn gen_patch(&self, pool: Vec<String>) -> Patch<IPAddressPool> {
+        let pool = IPAddressPool {
             metadata: ObjectMeta {
                 name: Some(self.name.into()),
                 ..ObjectMeta::default()
             },
-            spec: IpAddressPoolSpec {
+            spec: IPAddressPoolSpec {
                 addresses: pool,
-                ..IpAddressPoolSpec::default()
+                ..IPAddressPoolSpec::default()
             },
-        });
-        debug!("Generated Patch: {:?}", p);
-        p
+        };
+        debug!(
+            "Generated Patch: {:?}",
+            serde_json::to_string(&pool)
+                .unwrap_or_else(|_| "Error while serializing object".to_string())
+        );
+        Patch::Merge(pool)
     }
 }
 
@@ -135,7 +167,7 @@ impl Connector for KubeClient<'_> {
     }
 
     async fn replace(&self, old: &Ipv6Net, new: &Ipv6Net) -> Result<(), ConnectorError> {
-        let pools_api: Api<IpAddressPool> = Api::default_namespaced(self.client.clone());
+        let pools_api: Api<IPAddressPool> = Api::default_namespaced(self.client.clone());
         let pool = self.find_pool().await?;
 
         // This vec contains all addresses *except* for the old address, we can then add our new range if it makes sense
@@ -184,7 +216,7 @@ impl Connector for KubeClient<'_> {
     }
 
     async fn insert(&self, range: &Ipv6Net) -> Result<(), ConnectorError> {
-        let pools_api: Api<IpAddressPool> = Api::default_namespaced(self.client.clone());
+        let pools_api: Api<IPAddressPool> = Api::default_namespaced(self.client.clone());
         let mut pool = self.find_pool().await?;
 
         let None = net_in_pool(&pool, range) else {
@@ -208,7 +240,7 @@ impl Connector for KubeClient<'_> {
 }
 
 // Checks whether the address exists in the IPAddressPool, returns the index as an option if found
-fn net_in_pool(pool: &IpAddressPool, addr: &Ipv6Net) -> Option<usize> {
+fn net_in_pool(pool: &IPAddressPool, addr: &Ipv6Net) -> Option<usize> {
     let mut pos = None;
     for (i, a) in pool.spec.addresses.iter().enumerate() {
         if a == &addr.to_string() {

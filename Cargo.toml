@@ -25,19 +25,21 @@ exclude = [
 async-trait = "0.1.58"
 clap = { version = "4.0.22", features = ["derive", "env"] }
 env_logger = "0.9.3"
+hyper = { version = "0.14.23", features = ["client"] }
+ip_rfc = "0.1.0"
 ipnet = "2.5.1"
-iprange = "0.6.7"
-itertools = "0.10.5"
 k8s-openapi = { version = "0.16.0", features = ["v1_20"] }
-kube = { version = "0.76.0", features = ["derive"] }
+kube = { version = "0.76.0", features = ["derive", "rustls-tls", "client", "config", "kube-derive"], default-features = false }
 log = "0.4.17"
 network-interface = "0.1.4"
+rustls = "0.20.7"
 schemars = "0.8.11"
 serde = { version = "1.0.147", features = ["derive"] }
 serde_json = "1.0.87"
 strum = { version = "0.24.1", features = ["derive"] }
 thiserror = "1.0.37"
 tokio = { version = "1.21.2", features = ["full"] }
+tower = "0.4.13"
 
 [dev-dependencies]
 mockall = "0.11.3"

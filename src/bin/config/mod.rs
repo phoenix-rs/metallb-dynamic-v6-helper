@@ -11,6 +11,11 @@ use strum::IntoStaticStr;
 pub enum Source {
     Iface,
 }
+impl Default for Source {
+    fn default() -> Self {
+        Source::Iface
+    }
+}
 
 /// Used to set the applications loglevel
 // This is essentially a re-creation of log:Level. However, that enum doesn't derive ValueEnum, so we have to do it manually here
@@ -33,6 +38,11 @@ impl From<Loglevel> for LevelFilter {
         }
     }
 }
+impl Default for Loglevel {
+    fn default() -> Self {
+        Loglevel::Info
+    }
+}
 
 macro_rules! env_prefix {
     () => {
@@ -40,7 +50,7 @@ macro_rules! env_prefix {
     };
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Parser)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Parser, Default)]
 #[command(author, version, about, long_about = None)]
 pub struct Config {
     /// Name of the IpAddressPool resource to update in k8s
@@ -50,15 +60,23 @@ pub struct Config {
     /// Example ::beef:0:0:0/80 + <dynamic prefix+subnet>, => 2003:abc:def:aaaa:beef:0:0:0/80
     pub metallb_host_range: Ipv6Net,
 
+    /// Length of the dynamically changing v6 network (prefix + subnet).
+    /// Should be 64 unless you have a weird Ipv6 setup with custom addressing.
+    #[arg(
+        long,
+        env = concat!(env_prefix!(), "SOURCE"),
+        default_value_t = 64
+    )]
+    pub network_length: u8,
+
     /// Source from which to retrieve the desired IPv6 prefix from. Can be any of [`config:Source`]
     #[arg(
         value_enum,
         short = 's',
         long,
         env = concat!(env_prefix!(), "SOURCE"),
-        default_value_t = Source::Iface,
+        default_value_t = Source::default(),
         requires_if(OsStr::new(Source::Iface.into()), "iface"),
-
     )]
     pub source: Source,
 
@@ -74,7 +92,7 @@ pub struct Config {
         long,
         short = 'l',
         env = concat!(env_prefix!(), "LOGLEVEL"),
-        default_value_t = Loglevel::Info
+        default_value_t = Loglevel::default()
     )]
     pub loglevel: Loglevel,
 
@@ -86,4 +104,17 @@ pub struct Config {
         default_value_t = 60
     )]
     pub interval: u64,
+
+    /// Do not make any changes to the pool, only show what would happen
+    #[arg(long, short = 'd', action, default_value_t = false)]
+    pub dry_run: bool,
+
+    /// Don't validate the k8s API server certificates
+    #[arg(
+        long,
+        action,
+        default_value_t = false,
+        env = concat!(env_prefix!(), "VERIFY"),
+    )]
+    pub no_verify: bool,
 }

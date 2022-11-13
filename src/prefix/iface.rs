@@ -8,7 +8,7 @@ use thiserror::Error;
 #[cfg(test)]
 use mockall::automock;
 
-use super::{super::IPV6_NETWORK_LENGTH, PrefixSource, SourceError};
+use super::{PrefixSource, SourceError};
 
 #[derive(Error, Debug)]
 pub enum IfaceError {
@@ -28,11 +28,26 @@ impl From<IfaceError> for SourceError {
 
 pub struct IfaceSource {
     iface_name: String,
+    network_length: u8,
 }
 
 impl IfaceSource {
-    pub fn try_new(iface_name: String) -> Result<Box<dyn PrefixSource>, IfaceError> {
-        let source = IfaceSource { iface_name };
+    #[cfg(test)]
+    pub fn test_new(iface_name: String, network_length: u8) -> IfaceSource {
+        IfaceSource {
+            iface_name,
+            network_length,
+        }
+    }
+
+    pub fn try_new(
+        iface_name: String,
+        network_length: u8,
+    ) -> Result<Box<dyn PrefixSource>, IfaceError> {
+        let source = IfaceSource {
+            iface_name,
+            network_length,
+        };
         // Try to resolve iface addresses once, just to make sure its there
         match source.addrs() {
             Err(e) => match e {
@@ -75,12 +90,8 @@ impl IfaceSource {
             .filter_map(|a| match a {
                 Addr::V4(_) => None,
                 Addr::V6(v6a) => {
-                    if v6a.ip.is_unicast_global()
-                        && v6a.netmask.is_some()
-                        && u128::from(v6a.netmask.unwrap()).count_ones()
-                            == IPV6_NETWORK_LENGTH as u32
-                    {
-                        Some((v6a.ip, v6a.netmask.unwrap()))
+                    if ip_rfc::global_v6(&v6a.ip) {
+                        Some(v6a.ip)
                     } else {
                         debug!("Ignoring address {:?} because it is not global", v6a.ip);
                         None
@@ -89,7 +100,7 @@ impl IfaceSource {
             })
             .collect();
 
-        let Some((addr, mask)) = v6_addrs.pop() else {
+        let Some(addr) = v6_addrs.pop() else {
             return None;
         };
         if !v6_addrs.is_empty() {
@@ -99,9 +110,10 @@ impl IfaceSource {
             );
         }
 
-        let network_part = Ipv6Addr::from(u128::from(addr) & u128::from(mask));
+        let netmask: u128 = !(u128::MAX >> self.network_length);
+        let network_part = Ipv6Addr::from(u128::from(addr) & netmask);
 
-        match Ipv6Net::new(network_part, IPV6_NETWORK_LENGTH) {
+        match Ipv6Net::new(network_part, self.network_length) {
             Ok(net) => Some(net),
             Err(e) => {
                 warn!("Unable to construct Ipv6 prefix: {}", e.to_string());
@@ -123,5 +135,45 @@ impl PrefixSource for IfaceSource {
             Some(net) => Ok(net),
             None => Err(IfaceError::NoIpv6Prefix(self.iface_name.to_string()).into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        net::{Ipv4Addr, Ipv6Addr},
+        str::FromStr,
+    };
+
+    use ipnet::Ipv6Net;
+    use network_interface::{Addr, V4IfAddr, V6IfAddr};
+
+    use super::IfaceSource;
+
+    #[test]
+    fn finds_correct_net() {
+        let s = IfaceSource::test_new("test0".to_string(), 48);
+        let r = s.find_v6_net(&[
+            Addr::V6(V6IfAddr {
+                ip: Ipv6Addr::from_str("fe80::bc4d:ffff:fe13:47ce").unwrap(),
+                broadcast: None,
+                netmask: None,
+            }),
+            Addr::V4(V4IfAddr {
+                ip: Ipv4Addr::from_str("10.10.10.2").unwrap(),
+                broadcast: None,
+                netmask: None,
+            }),
+            Addr::V6(V6IfAddr {
+                ip: Ipv6Addr::from_str("2003:ee:970c:80aa::199").unwrap(),
+                broadcast: None,
+                netmask: None,
+            }),
+        ]);
+        assert!(r.is_some());
+        assert_eq!(
+            Ipv6Net::new(Ipv6Addr::from_str("2003:ee:970c::0").unwrap(), 48).unwrap(),
+            r.unwrap()
+        );
     }
 }

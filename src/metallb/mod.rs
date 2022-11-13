@@ -1,13 +1,24 @@
 mod k8s;
 
+use std::fmt::Display;
+
 use async_trait::async_trait;
 pub use k8s::KubeClient;
 
 use ipnet::Ipv6Net;
 #[cfg(test)]
 use mockall::automock;
+use thiserror::Error;
 
-pub type ConnectorError = String;
+#[derive(Error, Debug)]
+pub struct ConnectorError {
+    msg: String,
+}
+impl Display for ConnectorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.msg)
+    }
+}
 
 #[cfg_attr(test, automock)]
 #[async_trait]

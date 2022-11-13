@@ -24,10 +24,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     debug!("Parsed config: {:?}", config);
 
     let source = match config.source {
-        config::Source::Iface => IfaceSource::try_new(config.iface.clone())?,
+        config::Source::Iface => IfaceSource::try_new(config.iface.clone(), config.network_length)?,
     };
     debug!("Initialized source {:?}", config.source);
-    let pool = KubeClient::try_new(config.metallb_address_pool.as_str()).await?;
+    let pool = KubeClient::try_new(config.metallb_address_pool.as_str(), config.no_verify).await?;
     debug!("initialized MetalLB pool {:?}", config.metallb_address_pool);
 
     loop {
@@ -54,14 +54,16 @@ async fn run(
     pool_conn: &dyn Connector,
     config: &Config,
 ) -> Result<(), Box<dyn Error>> {
+    let target_network = source.v6_network()?;
+    info!("Determined desired IPv6 network to be {}", target_network);
+
     let current_ranges = pool_conn.v6_ranges().await?;
     info!(
         "Found the following Ipv6 ranges in pool {}: {:?}",
         config.metallb_address_pool, current_ranges
     );
     let current_range = find_dynamic_mlb_range(&current_ranges, &config.metallb_host_range);
-    let target_network = source.v6_network()?;
-    info!("Determined desired IPv6 network to be {}", target_network);
+
     let target_range = generate_target_range(&target_network, &config.metallb_host_range)?;
     info!("Calculated desired MetalLB range: {}", target_range);
 
@@ -78,7 +80,9 @@ async fn run(
                     "Range in MetalLB pool ({}) outdated, replacing with new range: {}",
                     current_range, target_range
                 );
-                pool_conn.replace(current_range, &target_range).await?;
+                if !config.dry_run {
+                    pool_conn.replace(current_range, &target_range).await?;
+                }
                 Ok(())
             }
         }
@@ -87,7 +91,10 @@ async fn run(
                 "No existing IPv6 range matches address pool {}, adding range {}",
                 config.metallb_address_pool, target_range
             );
-            pool_conn.insert(&target_range).await?;
+            if !config.dry_run {
+                pool_conn.insert(&target_range).await?;
+            }
+            info!("Pool updated");
             Ok(())
         }
     }
@@ -130,14 +137,13 @@ mod tests {
 
     use crate::{config::Config, test_run};
 
-    fn config() -> Config {
+    fn config(dry_run: bool) -> Config {
         Config {
             metallb_address_pool: "my-pool".to_string(),
             metallb_host_range: Ipv6Net::from_str("::abab:cdcd:0:0/80").unwrap(),
-            source: crate::config::Source::Iface,
             iface: "eth0".to_string(),
-            loglevel: crate::config::Loglevel::Info,
-            interval: 60,
+            dry_run,
+            ..Default::default()
         }
     }
 
@@ -178,12 +184,12 @@ mod tests {
     #[test]
     fn creates_missing_range() {
         let mock_source = mock_source();
-        let mut mock_pool = MockConnector::new();
-        mock_pool
+        let mut mock_connector = MockConnector::new();
+        mock_connector
             .expect_v6_ranges()
             .once()
             .returning(|| Ok(vec![range_other()]));
-        mock_pool
+        mock_connector
             .expect_insert()
             .once()
             .with(predicate::eq(range_correct()))
@@ -191,8 +197,8 @@ mod tests {
 
         test_run(
             Box::new(mock_source).as_ref(),
-            Box::new(mock_pool).as_ref(),
-            &config(),
+            Box::new(mock_connector).as_ref(),
+            &config(false),
         )
         .unwrap();
     }
@@ -200,12 +206,12 @@ mod tests {
     #[test]
     fn updates_outdated_range() {
         let mock_source = mock_source();
-        let mut mock_pool = MockConnector::new();
-        mock_pool
+        let mut mock_connector = MockConnector::new();
+        mock_connector
             .expect_v6_ranges()
             .once()
             .returning(|| Ok(vec![range_outdated(), range_other()]));
-        mock_pool
+        mock_connector
             .expect_replace()
             .once()
             .with(
@@ -216,8 +222,8 @@ mod tests {
 
         test_run(
             Box::new(mock_source).as_ref(),
-            Box::new(mock_pool).as_ref(),
-            &config(),
+            Box::new(mock_connector).as_ref(),
+            &config(false),
         )
         .unwrap();
     }
@@ -225,15 +231,46 @@ mod tests {
     #[test]
     fn detects_correct_range() {
         let mock_source = mock_source();
-        let mut mock_pool = MockConnector::new();
-        mock_pool
+        let mut mock_connector = MockConnector::new();
+        mock_connector
             .expect_v6_ranges()
             .once()
             .returning(|| Ok(vec![range_correct(), range_other()]));
         test_run(
             Box::new(mock_source).as_ref(),
-            Box::new(mock_pool).as_ref(),
-            &config(),
+            Box::new(mock_connector).as_ref(),
+            &config(false),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn respects_dry_run() {
+        // Part 1, missing range
+        let insert_source = mock_source();
+        let mut insert_connector = MockConnector::new();
+        insert_connector
+            .expect_v6_ranges()
+            .once()
+            .returning(|| Ok(vec![range_other()]));
+        test_run(
+            Box::new(insert_source).as_ref(),
+            Box::new(insert_connector).as_ref(),
+            &config(true),
+        )
+        .unwrap();
+
+        // Part 2, update range
+        let update_source = mock_source();
+        let mut update_connector = MockConnector::new();
+        update_connector
+            .expect_v6_ranges()
+            .once()
+            .returning(|| Ok(vec![range_outdated(), range_other()]));
+        test_run(
+            Box::new(update_source).as_ref(),
+            Box::new(update_connector).as_ref(),
+            &config(true),
         )
         .unwrap();
     }
