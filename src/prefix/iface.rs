@@ -111,6 +111,7 @@ impl IfaceSource {
     }
 }
 
+#[cfg_attr(test, automock)]
 impl PrefixSource for IfaceSource {
     fn v6_network(&self) -> Result<Ipv6Net, SourceError> {
         let addrs = match self.addrs() {

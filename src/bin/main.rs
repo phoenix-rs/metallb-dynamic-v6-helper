@@ -1,6 +1,5 @@
 mod config;
 
-use std::thread;
 use std::time::Duration;
 use std::{error::Error, net::Ipv6Addr};
 
@@ -16,8 +15,10 @@ use metallb_v6_prefix_helper::{
     prefix::{IfaceSource, PrefixSource},
     IPV6_NETMASK,
 };
+use tokio::time::sleep;
 
-fn main() -> Result<(), Box<dyn Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
     let config = Config::parse();
     Builder::new().filter_level(config.loglevel.into()).init();
     debug!("Parsed config: {:?}", config);
@@ -26,33 +27,34 @@ fn main() -> Result<(), Box<dyn Error>> {
         config::Source::Iface => IfaceSource::try_new(config.iface.clone())?,
     };
     debug!("Initialized source {:?}", config.source);
-    let pool = KubeClient::new(config.metallb_address_pool.as_str())?;
+    let pool = KubeClient::try_new(config.metallb_address_pool.as_str()).await?;
     debug!("initialized MetalLB pool {:?}", config.metallb_address_pool);
 
     loop {
-        match run(source.as_ref(), pool.as_ref(), &config) {
+        match run(source.as_ref(), pool.as_ref(), &config).await {
             Ok(_) => {}
             Err(e) => error!("Error: {}", e),
         };
-        thread::sleep(Duration::from_secs(config.interval))
+        sleep(Duration::from_secs(config.interval)).await;
     }
 }
 
 #[cfg(test)]
-fn test_run(
+#[tokio::main]
+async fn test_run(
     source: &dyn PrefixSource,
     pool_conn: &dyn Connector,
     config: &Config,
 ) -> Result<(), Box<dyn Error>> {
-    run(source, pool_conn, config)
+    run(source, pool_conn, config).await
 }
 
-fn run(
+async fn run(
     source: &dyn PrefixSource,
     pool_conn: &dyn Connector,
     config: &Config,
 ) -> Result<(), Box<dyn Error>> {
-    let current_ranges = pool_conn.v6_ranges()?;
+    let current_ranges = pool_conn.v6_ranges().await?;
     info!(
         "Found the following Ipv6 ranges in pool {}: {:?}",
         config.metallb_address_pool, current_ranges
@@ -76,7 +78,7 @@ fn run(
                     "Range in MetalLB pool ({}) outdated, replacing with new range: {}",
                     current_range, target_range
                 );
-                pool_conn.replace(current_range, &target_range)?;
+                pool_conn.replace(current_range, &target_range).await?;
                 Ok(())
             }
         }
@@ -85,7 +87,7 @@ fn run(
                 "No existing IPv6 range matches address pool {}, adding range {}",
                 config.metallb_address_pool, target_range
             );
-            pool_conn.insert(&target_range)?;
+            pool_conn.insert(&target_range).await?;
             Ok(())
         }
     }
@@ -118,7 +120,8 @@ fn find_dynamic_mlb_range<'a>(ranges: &'a [Ipv6Net], host_range: &Ipv6Net) -> Op
 mod tests {
     use std::str::FromStr;
 
-    use ipnet::{Ipv4Net, Ipv6Net};
+    use async_trait::async_trait;
+    use ipnet::Ipv6Net;
     use metallb_v6_prefix_helper::{
         metallb::{Connector, ConnectorError},
         prefix::{PrefixSource, SourceError},
@@ -157,10 +160,11 @@ mod tests {
     }
     mock! {
         Connector {}
+        #[async_trait]
         impl Connector for Connector {
-            fn v6_ranges(&self) -> Result<Vec<Ipv6Net>, ConnectorError>;
-            fn replace(&self, old: &Ipv6Net, new: &Ipv6Net) -> Result<(), ConnectorError>;
-            fn insert(&self, range: &Ipv6Net) -> Result<(), ConnectorError>;
+            async fn v6_ranges(&self) -> Result<Vec<Ipv6Net>, ConnectorError>;
+            async fn replace(&self, old: &Ipv6Net, new: &Ipv6Net) -> Result<(), ConnectorError>;
+            async fn insert(&self, range: &Ipv6Net) -> Result<(), ConnectorError>;
         }
     }
 
@@ -175,7 +179,10 @@ mod tests {
     fn creates_missing_range() {
         let mock_source = mock_source();
         let mut mock_pool = MockConnector::new();
-        mock_pool.expect_v6_ranges().once().returning(|| Ok(vec![]));
+        mock_pool
+            .expect_v6_ranges()
+            .once()
+            .returning(|| Ok(vec![range_other()]));
         mock_pool
             .expect_insert()
             .once()
@@ -197,7 +204,7 @@ mod tests {
         mock_pool
             .expect_v6_ranges()
             .once()
-            .returning(|| Ok(vec![range_outdated()]));
+            .returning(|| Ok(vec![range_outdated(), range_other()]));
         mock_pool
             .expect_replace()
             .once()
@@ -222,7 +229,7 @@ mod tests {
         mock_pool
             .expect_v6_ranges()
             .once()
-            .returning(|| Ok(vec![range_correct()]));
+            .returning(|| Ok(vec![range_correct(), range_other()]));
         test_run(
             Box::new(mock_source).as_ref(),
             Box::new(mock_pool).as_ref(),

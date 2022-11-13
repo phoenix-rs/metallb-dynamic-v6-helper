@@ -1,5 +1,4 @@
 use std::ffi::OsStr;
-use std::time::Duration;
 
 use clap::ValueEnum;
 use clap::{arg, Parser};
