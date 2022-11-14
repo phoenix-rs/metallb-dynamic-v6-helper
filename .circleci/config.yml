@@ -1,0 +1,10 @@
+version: 2.1
+
+orbs:
+  rust: circleci/rust@1.6.0
+
+workflows:
+  ci:
+    jobs:
+      - rust/lint-test-build
+# VS Code Extension Version: 1.0.2
