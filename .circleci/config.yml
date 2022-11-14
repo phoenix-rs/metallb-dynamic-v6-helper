@@ -6,5 +6,6 @@ orbs:
 workflows:
   ci:
     jobs:
-      - rust/lint-test-build
+      - rust/lint-test-build:
+          version: "1.65"
 # VS Code Extension Version: 1.0.2
