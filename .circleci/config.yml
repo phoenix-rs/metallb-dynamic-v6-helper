@@ -10,6 +10,6 @@ workflows:
           matrix:
             parameters:
               target:
-                - linux-amd64
-                - linux-arm64
+                - rust/linux-amd64
+                - rust/linux-arm64
           rust_version: "1.65"
