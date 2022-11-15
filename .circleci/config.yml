@@ -1,7 +1,7 @@
 version: 2.1
 
 orbs:
-  rust: phoenix-rs/rust@0.1.0
+  rust: phoenix-rs/rust@0.1.1
 
 workflows:
   ci:
@@ -13,3 +13,4 @@ workflows:
                 - rust/linux-amd64
                 - rust/linux-arm64
           rust_version: "1.65"
+          release: false
